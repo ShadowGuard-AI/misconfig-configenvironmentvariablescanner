@@ -1,3 +1,5 @@
+![Banner](banner.png)
+
 # misconfig-ConfigEnvironmentVariableScanner
 Scans configuration files and environment variables for hardcoded credentials, API keys, and other sensitive information. Reports potential vulnerabilities due to exposing these secrets. Uses regex patterns and potential integration with existing secret scanning libraries. - Focused on Check for misconfigurations in configuration files or infrastructure definitions
 
