@@ -2,7 +2,6 @@ import argparse
 import os
 import re
 import json
-import yaml
 import logging
 import sys
 
@@ -27,6 +26,12 @@ class ConfigEnvironmentVariableScanner:
             "jwt_token": r"([Ee][yJj][0-9a-zA-Z\-\_]+\.[Ee][yJj][0-9a-zA-Z\-\_]+\.[0-9a-zA-Z\-\_\+\/\=]+)"
 
         }
+        # Scan bookkeeping: a run that read nothing must not report a
+        # clean result, so main reads these counters.
+        self.files_scanned = 0
+        self.lines_scanned = 0
+        self.read_errors = 0
+        self.scanned_paths = []
 
     def scan_file(self, file_path):
         """
@@ -42,19 +47,28 @@ class ConfigEnvironmentVariableScanner:
         findings = []
         try:
             with open(file_path, 'r') as f:
+                self.files_scanned += 1
+                self.scanned_paths.append(os.path.realpath(file_path))
                 for i, line in enumerate(f):
+                    self.lines_scanned += 1
                     for pattern_name, pattern in self.patterns.items():
                         match = re.search(pattern, line)
                         if match:
+                            # The matched value is never stored,
+                            # printed, or written out. A finding
+                            # carries the pattern kind, file, and line
+                            # only.
                             findings.append({
                                 "file": file_path,
                                 "line": i + 1,
                                 "pattern": pattern_name,
-                                "match": match.group(0).strip()
+                                "key": match.group(1) if match.groups() else pattern_name
                             })
         except FileNotFoundError:
+            self.read_errors += 1
             logging.error(f"File not found: {file_path}")
         except Exception as e:
+            self.read_errors += 1
             logging.error(f"Error reading file {file_path}: {e}")
         return findings
 
@@ -67,15 +81,26 @@ class ConfigEnvironmentVariableScanner:
                   and matched pattern.
         """
         findings = []
+        sensitive_name = re.compile(r"(?i)(api[_-]?key|secret|password|passwd|pwd|token|aws_|credential)")
         for var_name, var_value in os.environ.items():
+            self.lines_scanned += 1
+            # The keyword of an environment secret sits in the
+            # variable name, so search name and value together.
+            search_text = f"{var_name}={var_value}"
+            matched = False
             for pattern_name, pattern in self.patterns.items():
-                match = re.search(pattern, var_value)
+                match = re.search(pattern, search_text)
                 if match:
                     findings.append({
                         "environment_variable": var_name,
-                        "pattern": pattern_name,
-                        "match": match.group(0).strip()
+                        "pattern": pattern_name
                     })
+                    matched = True
+            if not matched and var_value and sensitive_name.search(var_name):
+                findings.append({
+                    "environment_variable": var_name,
+                    "pattern": "sensitive_name"
+                })
         return findings
 
     def process_directory(self, directory):
@@ -123,27 +148,49 @@ def main():
     all_findings = []
 
     if args.file:
+        if not os.path.isfile(args.file):
+            logging.error(f"File not found: {args.file}")
+            print("Nothing was scanned: the named file does not exist.")
+            sys.exit(1)
         all_findings = scanner.scan_file(args.file)
     elif args.directory:
+        if not os.path.isdir(args.directory):
+            logging.error(f"Directory not found: {args.directory}")
+            print("Nothing was scanned: the named directory does not exist.")
+            sys.exit(1)
         all_findings = scanner.process_directory(args.directory)
     elif args.environment:
         all_findings = scanner.scan_environment_variables()
-    
-    if args.output: #If output file is specified, write to file.
+
+    scanned_anything = scanner.lines_scanned > 0 or (args.environment and len(os.environ) > 0)
+    if args.environment:
+        scanned_anything = len(os.environ) > 0
+    if not scanned_anything:
+        print("Nothing was scanned.")
+        sys.exit(1)
+
+    if args.output:
+        resolved_output = os.path.realpath(args.output)
+        if resolved_output in scanner.scanned_paths:
+            logging.error("Output path is one of the scanned files; refusing to overwrite it.")
+            print("Error: the output path must not be a scanned file.")
+            sys.exit(1)
         try:
             with open(args.output, 'w') as outfile:
                 json.dump(all_findings, outfile, indent=4)
             logging.info(f"Findings written to {args.output}")
         except Exception as e:
             logging.error(f"Error writing to output file: {e}")
-
+            sys.exit(1)
 
     if all_findings:
         print("Potential secrets found:")
         for finding in all_findings:
             print(finding)
+        sys.exit(1)
     else:
         print("No potential secrets found.")
+        sys.exit(0)
 
 
 if __name__ == "__main__":
