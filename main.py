@@ -23,6 +23,11 @@ class ConfigEnvironmentVariableScanner:
             "api_key": r"(?i)(api_key|apikey|secret_key|secretkey)\s*[:=]\s*[\"']?([a-zA-Z0-9_-]+)[\"']?",
             "password": r"(?i)(password|pwd)\s*[:=]\s*[\"']?([a-zA-Z0-9!@#$%^&*()_+-=]+)[\"']?",
             "aws_key": r"(?i)(aws_access_key_id|aws_secret_access_key)\s*[:=]\s*[\"']?([A-Za-z0-9/+=]+)[\"']?",
+            # The token pattern is the odd one out: it needs no key name
+            # beside it, because a JWT carries its own shape. It only
+            # recognises the common eyJ opening of a JSON header, so a
+            # token built on a differently ordered or padded header can
+            # pass under it unnoticed.
             "jwt_token": r"([Ee][yJj][0-9a-zA-Z\-\_]+\.[Ee][yJj][0-9a-zA-Z\-\_]+\.[0-9a-zA-Z\-\_\+\/\=]+)"
 
         }
@@ -51,6 +56,12 @@ class ConfigEnvironmentVariableScanner:
                 self.scanned_paths.append(os.path.realpath(file_path))
                 for i, line in enumerate(f):
                     self.lines_scanned += 1
+                    # The value character sets in these patterns are where my
+                    # coverage ends. A secret containing a dot, a space, or a
+                    # character outside the set for its pattern is matched only
+                    # up to that character, or not at all, and a value assigned
+                    # with no key name on the same line is invisible to the three
+                    # named patterns entirely.
                     for pattern_name, pattern in self.patterns.items():
                         match = re.search(pattern, line)
                         if match:
@@ -95,7 +106,19 @@ class ConfigEnvironmentVariableScanner:
                         "environment_variable": var_name,
                         "pattern": pattern_name
                     })
+                    # A variable can collect one finding per pattern, plus the
+                    # name based one is the only duplicate I suppress. The same
+                    # variable can therefore appear several times in my output
+                    # under different pattern names, which a reader counting
+                    # findings should know before treating the count as a count
+                    # of distinct secrets.
                     matched = True
+            # This fallback judges the name alone, so an ordinary switch
+            # like TOKEN_ENABLED set to true is reported as a finding,
+            # while a variable actually named API_KEY with an empty value
+            # escapes, because the empty value fails the test on the left
+            # and the named patterns above need at least one value
+            # character to match.
             if not matched and var_value and sensitive_name.search(var_name):
                 findings.append({
                     "environment_variable": var_name,
@@ -117,6 +140,11 @@ class ConfigEnvironmentVariableScanner:
         for root, _, files in os.walk(directory):
             for file in files:
                 file_path = os.path.join(root, file)
+                # A directory scan opens every file in the tree as text,
+                # whatever it is. Binary files raise on decode, are counted
+                # as read errors, and contribute nothing, and os.walk does
+                # not follow directory symlinks, so a tree reached only
+                # through a link is skipped in silence.
                 findings.extend(self.scan_file(file_path))
         return findings
 
@@ -171,6 +199,11 @@ def main():
 
     if args.output:
         resolved_output = os.path.realpath(args.output)
+        # The refusal list holds only files that were actually opened.
+        # An output path inside a scanned directory that did not exist
+        # when the walk passed is not in it, so the findings file can
+        # still land inside the tree I just scanned, ready to be
+        # scanned itself on the next run.
         if resolved_output in scanner.scanned_paths:
             logging.error("Output path is one of the scanned files; refusing to overwrite it.")
             print("Error: the output path must not be a scanned file.")
